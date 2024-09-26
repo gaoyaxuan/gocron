@@ -42,9 +42,9 @@ type internalJob struct {
 	startImmediately   bool
 	stopTime           time.Time
 	// event listeners
-	afterJobRuns          func(jobID uuid.UUID, jobName string)
-	beforeJobRuns         func(jobID uuid.UUID, jobName string)
-	afterJobRunsWithError func(jobID uuid.UUID, jobName string, err error)
+	afterJobRuns          func(jobID uuid.UUID, jobName string, beforeJobRunReturnValue interface{})
+	beforeJobRuns         func(jobID uuid.UUID, jobName string) interface{}
+	afterJobRunsWithError func(jobID uuid.UUID, jobName string, err error, beforeJobRunReturnValue interface{})
 	afterJobRunsWithPanic func(jobID uuid.UUID, jobName string, recoverData any)
 	afterLockError        func(jobID uuid.UUID, jobName string, err error)
 
@@ -700,7 +700,7 @@ type EventListener func(*internalJob) error
 
 // BeforeJobRuns is used to listen for when a job is about to run and
 // then run the provided function.
-func BeforeJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string)) EventListener {
+func BeforeJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string) interface{}) EventListener {
 	return func(j *internalJob) error {
 		if eventListenerFunc == nil {
 			return ErrEventListenerFuncNil
@@ -712,7 +712,7 @@ func BeforeJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string)) Even
 
 // AfterJobRuns is used to listen for when a job has run
 // without an error, and then run the provided function.
-func AfterJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string)) EventListener {
+func AfterJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string, beforeJobRunReturnValue interface{})) EventListener {
 	return func(j *internalJob) error {
 		if eventListenerFunc == nil {
 			return ErrEventListenerFuncNil
@@ -724,7 +724,7 @@ func AfterJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string)) Event
 
 // AfterJobRunsWithError is used to listen for when a job has run and
 // returned an error, and then run the provided function.
-func AfterJobRunsWithError(eventListenerFunc func(jobID uuid.UUID, jobName string, err error)) EventListener {
+func AfterJobRunsWithError(eventListenerFunc func(jobID uuid.UUID, jobName string, err error, beforeJobRunReturnValue interface{})) EventListener {
 	return func(j *internalJob) error {
 		if eventListenerFunc == nil {
 			return ErrEventListenerFuncNil

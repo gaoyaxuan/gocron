@@ -36,6 +36,28 @@ func callJobFuncWithParams(jobFunc any, params ...any) error {
 	return nil
 }
 
+func callJobFuncHasReturnWithParams(jobFunc any, params ...any) interface{} {
+	if jobFunc == nil {
+		return nil
+	}
+	f := reflect.ValueOf(jobFunc)
+	if f.IsZero() {
+		return nil
+	}
+	if len(params) != f.Type().NumIn() {
+		return nil
+	}
+	in := make([]reflect.Value, len(params))
+	for k, param := range params {
+		in[k] = reflect.ValueOf(param)
+	}
+	returnValues := f.Call(in)
+	if len(returnValues) > 0 {
+		return returnValues[0].Interface()
+	}
+	return nil
+}
+
 func requestJob(id uuid.UUID, ch chan jobOutRequest) *internalJob {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

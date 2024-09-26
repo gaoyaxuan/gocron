@@ -380,8 +380,11 @@ func (e *executor) runJob(j internalJob, jIn jobIn) {
 		}
 		defer func() { _ = lock.Unlock(j.ctx) }()
 	}
-	_ = callJobFuncWithParams(j.beforeJobRuns, j.id, j.name)
-
+	beforeJobStartTimeReturnValue := callJobFuncHasReturnWithParams(j.beforeJobRuns, j.id, j.name)
+	//防止返回的是nil导致反射调用报错
+	if beforeJobStartTimeReturnValue == nil {
+		beforeJobStartTimeReturnValue = ""
+	}
 	e.sendOutForRescheduling(&jIn)
 	select {
 	case e.jobsOutCompleted <- j.id:
@@ -392,10 +395,10 @@ func (e *executor) runJob(j internalJob, jIn jobIn) {
 	err := e.callJobWithRecover(j)
 	e.recordJobTiming(startTime, time.Now(), j)
 	if err != nil {
-		_ = callJobFuncWithParams(j.afterJobRunsWithError, j.id, j.name, err)
+		_ = callJobFuncWithParams(j.afterJobRunsWithError, j.id, j.name, err, beforeJobStartTimeReturnValue)
 		e.incrementJobCounter(j, Fail)
 	} else {
-		_ = callJobFuncWithParams(j.afterJobRuns, j.id, j.name)
+		_ = callJobFuncWithParams(j.afterJobRuns, j.id, j.name, beforeJobStartTimeReturnValue)
 		e.incrementJobCounter(j, Success)
 	}
 }
