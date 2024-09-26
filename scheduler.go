@@ -362,6 +362,9 @@ func (s *scheduler) selectExecJobsOutForRescheduling(id uuid.UUID) {
 		// and schedule the job for that time.
 		for next.Before(s.now()) {
 			next = j.next(next)
+			if next.IsZero() {
+				return
+			}
 		}
 	}
 
