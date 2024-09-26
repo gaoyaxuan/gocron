@@ -1053,16 +1053,11 @@ func (j job) Name() string {
 }
 
 func (j job) NextRun() (time.Time, error) {
-	ij := requestJob(j.id, j.jobOutRequest)
-	if ij == nil || ij.id == uuid.Nil {
-		return time.Time{}, ErrJobNotFound
+	runs, err := j.NextRuns(1)
+	if err != nil {
+		return time.Time{}, err
 	}
-	if len(ij.nextScheduled) == 0 {
-		return time.Time{}, nil
-	}
-	// the first element is the next scheduled run with subsequent
-	// runs following after in the slice
-	return ij.nextScheduled[0], nil
+	return runs[0], nil
 }
 
 func (j job) NextRuns(count int) ([]time.Time, error) {
@@ -1070,23 +1065,30 @@ func (j job) NextRuns(count int) ([]time.Time, error) {
 	if ij == nil || ij.id == uuid.Nil {
 		return nil, ErrJobNotFound
 	}
-
 	lengthNextScheduled := len(ij.nextScheduled)
 	if lengthNextScheduled == 0 {
-		return nil, nil
-	} else if count <= lengthNextScheduled {
-		return ij.nextScheduled[:count], nil
+		return []time.Time{}, nil
 	}
-
+	// 对设置限制次数的任务加以限制
+	var needRun uint = 1
+	if ij.limitRunsTo != nil {
+		needRun = ij.limitRunsTo.limit - ij.limitRunsTo.runCount
+	}
 	out := make([]time.Time, count)
 	for i := 0; i < count; i++ {
+
 		if i < lengthNextScheduled {
 			out[i] = ij.nextScheduled[i]
-			continue
+		} else {
+			from := out[i-1]
+			out[i] = ij.next(from)
 		}
-
-		from := out[i-1]
-		out[i] = ij.next(from)
+		if out[i].IsZero() || needRun == 0 || (!ij.stopTime.IsZero() && out[i].After(ij.stopTime)) {
+			return out[:i], nil
+		}
+		if ij.limitRunsTo != nil {
+			needRun = needRun - 1
+		}
 	}
 
 	return out, nil
