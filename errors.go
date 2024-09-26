@@ -53,6 +53,7 @@ var (
 	ErrStartTimeLaterThanEndTime     = fmt.Errorf("gocron: WithStartDateTime: start must not be later than end")
 	ErrStopTimeEarlierThanStartTime  = fmt.Errorf("gocron: WithStopDateTime: end must not be earlier than start")
 	ErrWithStopTimeoutZeroOrNegative = fmt.Errorf("gocron: WithStopTimeout: timeout must be greater than 0")
+	ErrWithFailedToAddJob            = fmt.Errorf("gocron: WithAddJob: fail to add job")
 )
 
 // internal errors

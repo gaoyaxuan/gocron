@@ -454,8 +454,20 @@ func (s *scheduler) selectNewJob(in newJobIn) {
 			}:
 			}
 		} else {
+			// 没设置开始时间
 			if next.IsZero() {
 				next = j.next(s.now())
+			} else {
+				// 开始时间可能是个之前的时间,那么需要获取到当前时间之后的时间
+				if next.Before(s.now()) {
+					for next.Before(s.now()) {
+						next = j.next(next)
+						// 防止出现死循环,如果获取到了空时间也证明没有需要执行的了
+						if next.IsZero() {
+							in.cancel()
+						}
+					}
+				}
 			}
 
 			id := j.id
@@ -699,7 +711,7 @@ func (s *scheduler) addOrUpdateJob(id uuid.UUID, definition JobDefinition, taskW
 		return nil, err
 	}
 
-	if s.exec.limitMode != nil && s.exec.limitMode.mode == LimitModeWait && j.singletonMode == true {
+	if s.exec.limitMode != nil && j.singletonMode == true {
 		j.singletonJobRunning = make(chan struct{}, 1)
 	}
 
@@ -715,6 +727,10 @@ func (s *scheduler) addOrUpdateJob(id uuid.UUID, definition JobDefinition, taskW
 
 	select {
 	case <-newJobCtx.Done():
+		_, ok := s.jobs[j.id]
+		if !ok {
+			return nil, ErrWithFailedToAddJob
+		}
 	case <-s.shutdownCtx.Done():
 	}
 

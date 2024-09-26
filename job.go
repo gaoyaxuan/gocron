@@ -623,10 +623,10 @@ func WithStartImmediately() StartAtOption {
 }
 
 // WithStartDateTime sets the first date & time at which the job should run.
-// This datetime must be in the future.
+// This datetime can be a past date.
 func WithStartDateTime(start time.Time) StartAtOption {
 	return func(j *internalJob, now time.Time) error {
-		if start.IsZero() || start.Before(now) {
+		if start.IsZero() {
 			return ErrWithStartDateTimePast
 		}
 		if !j.stopTime.IsZero() && j.stopTime.Before(start) {
