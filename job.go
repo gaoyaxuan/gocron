@@ -29,6 +29,8 @@ type internalJob struct {
 	// have multiple nextScheduled times
 	nextScheduled []time.Time
 
+	singletonJobRunning chan struct{}
+
 	lastRun            time.Time
 	function           any
 	parameters         []any

@@ -1047,7 +1047,7 @@ func TestScheduler_WithOptionsErrors(t *testing.T) {
 		},
 		{
 			"WithLimitConcurrentJobs limit 0",
-			WithLimitConcurrentJobs(0, LimitModeWait),
+			WithLimitConcurrentJobs(0, LimitModeWait, false),
 			ErrWithLimitConcurrentJobsZero,
 		},
 		{
@@ -1182,7 +1182,7 @@ func TestScheduler_LimitMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestScheduler(t,
-				WithLimitConcurrentJobs(tt.limit, tt.limitMode),
+				WithLimitConcurrentJobs(tt.limit, tt.limitMode, false),
 				WithStopTimeout(2*time.Second),
 			)
 
@@ -1257,7 +1257,7 @@ func TestScheduler_LimitModeAndSingleton(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestScheduler(t,
-				WithLimitConcurrentJobs(tt.limit, tt.limitMode),
+				WithLimitConcurrentJobs(tt.limit, tt.limitMode, false),
 				WithStopTimeout(2*time.Second),
 			)
 
@@ -1675,7 +1675,7 @@ func TestScheduler_JobsWaitingInQueue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newTestScheduler(t, WithLimitConcurrentJobs(tt.limit, tt.mode))
+			s := newTestScheduler(t, WithLimitConcurrentJobs(tt.limit, tt.mode, false))
 			for i := 0; i <= 4; i++ {
 				_, err := s.NewJob(OneTimeJob(tt.startAt()), NewTask(func() { time.Sleep(500 * time.Millisecond) }))
 				require.NoError(t, err)
@@ -2465,7 +2465,7 @@ func TestScheduler_WithLimitedRuns(t *testing.T) {
 		{
 			"OneTimeJob, WithLimitConcurrentJobs",
 			[]SchedulerOption{
-				WithLimitConcurrentJobs(1, LimitModeWait),
+				WithLimitConcurrentJobs(1, LimitModeWait, false),
 			},
 			OneTimeJob(OneTimeJobStartImmediately()),
 			nil,

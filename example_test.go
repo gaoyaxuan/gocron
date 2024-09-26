@@ -720,6 +720,7 @@ func ExampleWithLimitConcurrentJobs() {
 		WithLimitConcurrentJobs(
 			1,
 			LimitModeReschedule,
+			false,
 		),
 	)
 }

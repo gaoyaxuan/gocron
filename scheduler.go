@@ -235,7 +235,9 @@ func (s *scheduler) stopScheduler() {
 	}
 	for id, j := range s.jobs {
 		<-j.ctx.Done()
-
+		if j.singletonJobRunning != nil {
+			close(j.singletonJobRunning)
+		}
 		j.ctx, j.cancel = context.WithCancel(s.shutdownCtx)
 		s.jobs[id] = j
 	}
@@ -307,6 +309,9 @@ func (s *scheduler) selectRemoveJob(id uuid.UUID) {
 		return
 	}
 	j.stop()
+	if j.singletonJobRunning != nil {
+		close(j.singletonJobRunning)
+	}
 	delete(s.jobs, id)
 }
 
@@ -474,6 +479,9 @@ func (s *scheduler) selectRemoveJobsByTags(tags []string) {
 		for _, tag := range tags {
 			if slices.Contains(j.tags, tag) {
 				j.stop()
+				if j.singletonJobRunning != nil {
+					close(j.singletonJobRunning)
+				}
 				delete(s.jobs, j.id)
 				break
 			}
@@ -688,6 +696,10 @@ func (s *scheduler) addOrUpdateJob(id uuid.UUID, definition JobDefinition, taskW
 		return nil, err
 	}
 
+	if s.exec.limitMode != nil && s.exec.limitMode.mode == LimitModeWait && j.singletonMode == true {
+		j.singletonJobRunning = make(chan struct{}, 1)
+	}
+
 	newJobCtx, newJobCancel := context.WithCancel(context.Background())
 	select {
 	case <-s.shutdownCtx.Done():
@@ -878,16 +890,17 @@ const (
 // Warning: a single time consuming job can dominate your limit in the event
 // you are running both the scheduler limit WithLimitConcurrentJobs(1, LimitModeWait)
 // and a job limit WithSingletonMode(LimitModeReschedule).
-func WithLimitConcurrentJobs(limit uint, mode LimitMode) SchedulerOption {
+func WithLimitConcurrentJobs(limit uint, mode LimitMode, jobLimitModeCanOverride bool) SchedulerOption {
 	return func(s *scheduler) error {
 		if limit == 0 {
 			return ErrWithLimitConcurrentJobsZero
 		}
 		s.exec.limitMode = &limitModeConfig{
-			mode:          mode,
-			limit:         limit,
-			in:            make(chan jobIn, 1000),
-			singletonJobs: make(map[uuid.UUID]struct{}),
+			mode:                    mode,
+			limit:                   limit,
+			in:                      make(chan jobIn, 1000),
+			singletonJobs:           make(map[uuid.UUID]struct{}),
+			jobLimitModeCanOverride: jobLimitModeCanOverride,
 		}
 		if mode == LimitModeReschedule {
 			s.exec.limitMode.rescheduleLimiter = make(chan struct{}, limit)

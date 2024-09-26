@@ -73,6 +73,8 @@ type limitModeConfig struct {
 	// a limit mode and singleton mode are enabled.
 	singletonJobs   map[uuid.UUID]struct{}
 	singletonJobsMu sync.Mutex
+
+	jobLimitModeCanOverride bool
 }
 
 func (e *executor) start() {
@@ -131,44 +133,59 @@ func (e *executor) start() {
 				// // Canceling this context releases resources associated with it, so code should
 				// // call cancel as soon as the operations running in this Context complete.
 				defer cancel()
+				j := requestJobCtx(ctx, jIn.id, e.jobOutRequest)
+				if j == nil {
+					// safety check as it'd be strange bug if this occurred
+					return
+				}
 
 				// check for limit mode - this spins up a separate runner which handles
 				// limiting the total number of concurrently running jobs
 				if e.limitMode != nil {
-					if e.limitMode.mode == LimitModeReschedule {
-						select {
-						// rescheduleLimiter is a channel the size of the limit
-						// this blocks publishing to the channel and keeps
-						// the executor from building up a waiting queue
-						// and forces rescheduling
-						case e.limitMode.rescheduleLimiter <- struct{}{}:
-							e.limitMode.in <- jIn
-						default:
-							// all runners are busy, reschedule the work for later
-							// which means we just skip it here and do nothing
-							// TODO when metrics are added, this should increment a rescheduled metric
-							e.sendOutForRescheduling(&jIn)
-						}
-					} else {
-						// since we're not using LimitModeReschedule, but instead using LimitModeWait
-						// we do want to queue up the work to the limit mode runners and allow them
-						// to work through the channel backlog. A hard limit of 1000 is in place
-						// at which point this call would block.
-						// TODO when metrics are added, this should increment a wait metric
-						e.sendOutForRescheduling(&jIn)
-						e.limitMode.in <- jIn
+					finalLimitMode := e.limitMode.mode
+					if j.singletonMode && e.limitMode.jobLimitModeCanOverride {
+						finalLimitMode = j.singletonLimitMode
 					}
+					if j.singletonMode {
+						defer func() {
+							if r := recover(); r != nil {
+							}
+						}()
+						if finalLimitMode == LimitModeReschedule {
+							select {
+							case j.singletonJobRunning <- struct{}{}:
+								e.limitMode.in <- jIn
+							default:
+								e.sendOutForRescheduling(&jIn)
+							}
+
+						} else {
+							j.singletonJobRunning <- struct{}{}
+							e.limitMode.in <- jIn
+						}
+
+					} else {
+						if finalLimitMode == LimitModeReschedule {
+							select {
+							case e.limitMode.rescheduleLimiter <- struct{}{}:
+								e.limitMode.in <- jIn
+							default:
+								e.sendOutForRescheduling(&jIn)
+							}
+						} else {
+							e.sendOutForRescheduling(&jIn)
+							e.limitMode.in <- jIn
+						}
+
+					}
+
 				} else {
 					// no limit mode, so we're either running a regular job or
 					// a job with a singleton mode
 					//
 					// get the job, so we can figure out what kind it is and how
 					// to execute it
-					j := requestJobCtx(ctx, jIn.id, e.jobOutRequest)
-					if j == nil {
-						// safety check as it'd be strange bug if this occurred
-						return
-					}
+
 					if j.singletonMode {
 						// for singleton mode, get the existing runner for the job
 						// or spin up a new one
@@ -261,45 +278,21 @@ func (e *executor) limitModeRunner(name string, in chan jobIn, wg *waitGroupWith
 			ctx, cancel := context.WithCancel(e.ctx)
 			j := requestJobCtx(ctx, jIn.id, e.jobOutRequest)
 			cancel()
-			if j != nil {
-				if j.singletonMode {
-					e.limitMode.singletonJobsMu.Lock()
-					_, ok := e.limitMode.singletonJobs[jIn.id]
-					if ok {
-						// this job is already running, so don't run it
-						// but instead reschedule it
-						e.limitMode.singletonJobsMu.Unlock()
-						if jIn.shouldSendOut {
-							select {
-							case <-e.ctx.Done():
-								return
-							case <-j.ctx.Done():
-								return
-							case e.jobsOutForRescheduling <- j.id:
-							}
-						}
-						// remove the limiter block, as this particular job
-						// was a singleton already running, and we want to
-						// allow another job to be scheduled
-						if limitMode == LimitModeReschedule {
-							<-rescheduleLimiter
-						}
-						continue
-					}
-					e.limitMode.singletonJobs[jIn.id] = struct{}{}
-					e.limitMode.singletonJobsMu.Unlock()
-				}
-				e.runJob(*j, jIn)
+			if j == nil {
+				return
+			}
+			finalLimitMode := e.limitMode.mode
+			if j.singletonMode && e.limitMode.jobLimitModeCanOverride {
+				finalLimitMode = j.singletonLimitMode
+			}
+			e.runJob(*j, jIn)
 
-				if j.singletonMode {
-					e.limitMode.singletonJobsMu.Lock()
-					delete(e.limitMode.singletonJobs, jIn.id)
-					e.limitMode.singletonJobsMu.Unlock()
-				}
+			if j.singletonMode {
+				<-j.singletonJobRunning
 			}
 
 			// remove the limiter block to allow another job to be scheduled
-			if limitMode == LimitModeReschedule {
+			if finalLimitMode == LimitModeReschedule {
 				<-rescheduleLimiter
 			}
 		case <-e.ctx.Done():
