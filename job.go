@@ -43,11 +43,13 @@ type internalJob struct {
 	startImmediately   bool
 	stopTime           time.Time
 	// event listeners
-	afterJobRuns          func(jobID uuid.UUID, jobName string, beforeJobRunReturnValue interface{})
-	beforeJobRuns         func(jobID uuid.UUID, jobName string) interface{}
-	afterJobRunsWithError func(jobID uuid.UUID, jobName string, err error, beforeJobRunReturnValue interface{})
-	afterJobRunsWithPanic func(jobID uuid.UUID, jobName string, recoverData any)
-	afterLockError        func(jobID uuid.UUID, jobName string, err error)
+	afterJobRuns                        func(jobID uuid.UUID, jobName string, beforeJobRunReturnValue interface{})
+	beforeJobRuns                       func(jobID uuid.UUID, jobName string) interface{}
+	beforeJobRunsSkipIfBeforeFuncErrors func(jobID uuid.UUID, jobName string) error
+	afterJobRunsWithError               func(jobID uuid.UUID, jobName string, err error, beforeJobRunReturnValue interface{})
+	afterJobRunsWithPanic               func(jobID uuid.UUID, jobName string, recoverData any)
+	afterLockError                      func(jobID uuid.UUID, jobName string, err error)
+	disabledLocker                      bool
 
 	// 到达开始时间,任务开始运行前触发
 	beforeJobStartTime func(jobID uuid.UUID, jobName string)
@@ -325,8 +327,7 @@ type Weekdays func() []time.Weekday
 // NewWeekdays provide the days of the week the job should run.
 func NewWeekdays(weekday time.Weekday, weekdays ...time.Weekday) Weekdays {
 	return func() []time.Weekday {
-		weekdays = append(weekdays, weekday)
-		return weekdays
+		return append([]time.Weekday{weekday}, weekdays...)
 	}
 }
 
@@ -414,8 +415,7 @@ type DaysOfTheMonth func() days
 //	-5 == 5 days before the end of the month.
 func NewDaysOfTheMonth(day int, moreDays ...int) DaysOfTheMonth {
 	return func() days {
-		moreDays = append(moreDays, day)
-		return moreDays
+		return append([]int{day}, moreDays...)
 	}
 }
 
@@ -425,6 +425,14 @@ type atTime struct {
 
 func (a atTime) time(location *time.Location) time.Time {
 	return time.Date(0, 0, 0, int(a.hours), int(a.minutes), int(a.seconds), 0, location)
+}
+
+// TimeFromAtTime is a helper function to allow converting AtTime into a time.Time value
+// Note: the time.Time value will have zero values for all Time fields except Hours, Minutes, Seconds.
+//
+//	For example: time.Date(0, 0, 0, 1, 1, 1, 0, time.UTC)
+func TimeFromAtTime(at AtTime, loc *time.Location) time.Time {
+	return at().time(loc)
 }
 
 // AtTime defines a function that returns the internal atTime
@@ -445,8 +453,7 @@ type AtTimes func() []AtTime
 // the job should be run
 func NewAtTimes(atTime AtTime, atTimes ...AtTime) AtTimes {
 	return func() []AtTime {
-		atTimes = append(atTimes, atTime)
-		return atTimes
+		return append([]AtTime{atTime}, atTimes...)
 	}
 }
 
@@ -561,6 +568,16 @@ func WithDistributedJobLocker(locker Locker) JobOption {
 			return ErrWithDistributedJobLockerNil
 		}
 		j.locker = locker
+		return nil
+	}
+}
+
+// WithDisabledDistributedJobLocker disables the distributed job locker.
+// This is useful when a global distributed locker has been set on the scheduler
+// level using WithDistributedLocker and need to be disabled for specific jobs.
+func WithDisabledDistributedJobLocker(disabled bool) JobOption {
+	return func(j *internalJob, _ time.Time) error {
+		j.disabledLocker = disabled
 		return nil
 	}
 }
@@ -726,6 +743,19 @@ func BeforeJobRuns(eventListenerFunc func(jobID uuid.UUID, jobName string) inter
 			return ErrEventListenerFuncNil
 		}
 		j.beforeJobRuns = eventListenerFunc
+		return nil
+	}
+}
+
+// BeforeJobRunsSkipIfBeforeFuncErrors is used to listen for when a job is about to run and
+// then runs the provided function. If the provided function returns an error, the job will be
+// rescheduled and the current run will be skipped.
+func BeforeJobRunsSkipIfBeforeFuncErrors(eventListenerFunc func(jobID uuid.UUID, jobName string) error) EventListener {
+	return func(j *internalJob) error {
+		if eventListenerFunc == nil {
+			return ErrEventListenerFuncNil
+		}
+		j.beforeJobRunsSkipIfBeforeFuncErrors = eventListenerFunc
 		return nil
 	}
 }
@@ -1165,13 +1195,14 @@ func (j job) RunNow() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	resp := make(chan error, 1)
-
+	t := time.NewTimer(100 * time.Millisecond)
 	select {
 	case j.runJobRequest <- runJobRequest{
 		id:      j.id,
 		outChan: resp,
 	}:
-	case <-time.After(100 * time.Millisecond):
+		t.Stop()
+	case <-t.C:
 		return ErrJobRunNowFailed
 	}
 	var err error
