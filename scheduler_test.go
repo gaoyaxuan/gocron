@@ -361,6 +361,158 @@ func TestScheduler_StopTimeout(t *testing.T) {
 	}
 }
 
+func TestScheduler_StopLongRunningJobs(t *testing.T) {
+	defer verifyNoGoroutineLeaks(t)
+	t.Run("start, run job, stop jobs before job is completed", func(t *testing.T) {
+		s := newTestScheduler(t,
+			WithStopTimeout(50*time.Millisecond),
+		)
+
+		_, err := s.NewJob(
+			DurationJob(
+				50*time.Millisecond,
+			),
+			NewTask(
+				func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case <-time.After(100 * time.Millisecond):
+						t.Fatal("job can not been canceled")
+					}
+				},
+			),
+			WithStartAt(
+				WithStartImmediately(),
+			),
+			WithSingletonMode(LimitModeReschedule),
+		)
+		require.NoError(t, err)
+
+		s.Start()
+
+		time.Sleep(20 * time.Millisecond)
+		// the running job is canceled, no unexpected timeout error
+		require.NoError(t, s.StopJobs())
+		time.Sleep(100 * time.Millisecond)
+
+		require.NoError(t, s.Shutdown())
+	})
+	t.Run("start, run job, stop jobs before job is completed - manual context cancel", func(t *testing.T) {
+		s := newTestScheduler(t,
+			WithStopTimeout(50*time.Millisecond),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		_, err := s.NewJob(
+			DurationJob(
+				50*time.Millisecond,
+			),
+			NewTask(
+				func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case <-time.After(100 * time.Millisecond):
+						t.Fatal("job can not been canceled")
+					}
+				}, ctx,
+			),
+			WithStartAt(
+				WithStartImmediately(),
+			),
+			WithSingletonMode(LimitModeReschedule),
+		)
+		require.NoError(t, err)
+
+		s.Start()
+
+		time.Sleep(20 * time.Millisecond)
+		// the running job is canceled, no unexpected timeout error
+		cancel()
+		require.NoError(t, s.StopJobs())
+		time.Sleep(100 * time.Millisecond)
+
+		require.NoError(t, s.Shutdown())
+	})
+	t.Run("start, run job, stop jobs before job is completed - manual context cancel WithContext", func(t *testing.T) {
+		s := newTestScheduler(t,
+			WithStopTimeout(50*time.Millisecond),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		_, err := s.NewJob(
+			DurationJob(
+				50*time.Millisecond,
+			),
+			NewTask(
+				func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case <-time.After(100 * time.Millisecond):
+						t.Fatal("job can not been canceled")
+					}
+				},
+			),
+			WithStartAt(
+				WithStartImmediately(),
+			),
+			WithSingletonMode(LimitModeReschedule),
+			WithContext(ctx),
+		)
+		require.NoError(t, err)
+
+		s.Start()
+
+		time.Sleep(20 * time.Millisecond)
+		// the running job is canceled, no unexpected timeout error
+		cancel()
+		require.NoError(t, s.StopJobs())
+		time.Sleep(100 * time.Millisecond)
+
+		require.NoError(t, s.Shutdown())
+	})
+}
+
+func TestScheduler_StopAndStartLongRunningJobs(t *testing.T) {
+	defer verifyNoGoroutineLeaks(t)
+	t.Run("start, run job, stop jobs before job is completed", func(t *testing.T) {
+		s := newTestScheduler(t,
+			WithStopTimeout(50*time.Millisecond),
+		)
+
+		_, err := s.NewJob(
+			DurationJob(
+				50*time.Millisecond,
+			),
+			NewTask(
+				func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case <-time.After(100 * time.Millisecond):
+					}
+				},
+			),
+			WithStartAt(
+				WithStartImmediately(),
+			),
+			WithSingletonMode(LimitModeReschedule),
+		)
+		require.NoError(t, err)
+
+		s.Start()
+
+		time.Sleep(20 * time.Millisecond)
+		// the running job is canceled, no unexpected timeout error
+		require.NoError(t, s.StopJobs())
+
+		s.Start()
+
+		time.Sleep(200 * time.Millisecond)
+		require.NoError(t, s.Shutdown())
+	})
+}
+
 func TestScheduler_Shutdown(t *testing.T) {
 	defer verifyNoGoroutineLeaks(t)
 
@@ -540,6 +692,12 @@ func TestScheduler_NewJobErrors(t *testing.T) {
 			),
 			nil,
 			ErrCronJobInvalid,
+		},
+		{
+			"context nil",
+			DurationJob(time.Second),
+			[]JobOption{WithContext(nil)}, //nolint:staticcheck
+			ErrWithContextNil,
 		},
 		{
 			"duration job time interval is zero",
@@ -1318,13 +1476,13 @@ func TestScheduler_OneTimeJob_DoesNotCleanupNext(t *testing.T) {
 	tests := []struct {
 		name      string
 		runAt     time.Time
-		fakeClock clockwork.FakeClock
+		fakeClock *clockwork.FakeClock
 		assertErr require.ErrorAssertionFunc
 		// asserts things about schedules, advance time and perform new assertions
 		advanceAndAsserts []func(
 			t *testing.T,
 			j Job,
-			clock clockwork.FakeClock,
+			clock *clockwork.FakeClock,
 			runs *atomic.Uint32,
 		)
 	}{
@@ -1332,8 +1490,8 @@ func TestScheduler_OneTimeJob_DoesNotCleanupNext(t *testing.T) {
 			name:      "exhausted run do does not cleanup next item",
 			runAt:     time.Date(2024, time.April, 22, 4, 5, 0, 0, time.UTC),
 			fakeClock: clockwork.NewFakeClockAt(schedulerStartTime),
-			advanceAndAsserts: []func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32){
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+			advanceAndAsserts: []func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32){
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					require.Equal(t, uint32(0), runs.Load())
 
 					// last not initialized
@@ -1686,7 +1844,7 @@ func TestScheduler_RemoveJob(t *testing.T) {
 			}
 
 			err := s.RemoveJob(id)
-			assert.ErrorIs(t, err, err)
+			assert.ErrorIs(t, err, tt.err)
 			require.NoError(t, s.Shutdown())
 		})
 	}
@@ -2501,13 +2659,13 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 	tests := []struct {
 		name      string
 		atTimes   []time.Time
-		fakeClock clockwork.FakeClock
+		fakeClock *clockwork.FakeClock
 		assertErr require.ErrorAssertionFunc
 		// asserts things about schedules, advance time and perform new assertions
 		advanceAndAsserts []func(
 			t *testing.T,
 			j Job,
-			clock clockwork.FakeClock,
+			clock *clockwork.FakeClock,
 			runs *atomic.Uint32,
 		)
 	}{
@@ -2531,8 +2689,8 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 			name:      "one run 1 millisecond in the future",
 			atTimes:   []time.Time{n.Add(1 * time.Millisecond)},
 			fakeClock: clockwork.NewFakeClockAt(n),
-			advanceAndAsserts: []func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32){
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+			advanceAndAsserts: []func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32){
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					require.Equal(t, uint32(0), runs.Load())
 
 					// last not initialized
@@ -2566,8 +2724,8 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 			name:      "one run in the past and one in the future",
 			atTimes:   []time.Time{n.Add(-1 * time.Millisecond), n.Add(1 * time.Millisecond)},
 			fakeClock: clockwork.NewFakeClockAt(n),
-			advanceAndAsserts: []func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32){
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+			advanceAndAsserts: []func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32){
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					require.Equal(t, uint32(0), runs.Load())
 
 					// last not initialized
@@ -2597,8 +2755,8 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 			name:      "two runs in the future - order is maintained even if times are provided out of order",
 			atTimes:   []time.Time{n.Add(3 * time.Millisecond), n.Add(1 * time.Millisecond)},
 			fakeClock: clockwork.NewFakeClockAt(n),
-			advanceAndAsserts: []func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32){
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+			advanceAndAsserts: []func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32){
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					require.Equal(t, uint32(0), runs.Load())
 
 					// last not initialized
@@ -2627,7 +2785,7 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 					require.Equal(t, n.Add(3*time.Millisecond), nextRunAt)
 				},
 
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					// advance and eventually run
 					clock.Advance(2 * time.Millisecond)
 					require.Eventually(t, func() bool {
@@ -2650,8 +2808,8 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 			name:      "two runs in the future - order is maintained even if times are provided out of order - deduplication",
 			atTimes:   []time.Time{n.Add(3 * time.Millisecond), n.Add(1 * time.Millisecond), n.Add(1 * time.Millisecond), n.Add(3 * time.Millisecond)},
 			fakeClock: clockwork.NewFakeClockAt(n),
-			advanceAndAsserts: []func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32){
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+			advanceAndAsserts: []func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32){
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					require.Equal(t, uint32(0), runs.Load())
 
 					// last not initialized
@@ -2680,7 +2838,7 @@ func TestScheduler_AtTimesJob(t *testing.T) {
 					require.Equal(t, n.Add(3*time.Millisecond), nextRunAt)
 				},
 
-				func(t *testing.T, j Job, clock clockwork.FakeClock, runs *atomic.Uint32) {
+				func(t *testing.T, j Job, clock *clockwork.FakeClock, runs *atomic.Uint32) {
 					// advance and eventually run
 					clock.Advance(2 * time.Millisecond)
 					require.Eventually(t, func() bool {

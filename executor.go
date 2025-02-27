@@ -33,6 +33,8 @@ type executor struct {
 
 	// used by the executor to receive a stop signal from the scheduler
 	stopCh chan struct{}
+	// ensure that stop runs before the next call to start and only runs once
+	stopOnce *sync.Once
 	// the timeout value when stopping
 	stopTimeout time.Duration
 	// used to signal that the executor has completed shutdown
@@ -95,6 +97,7 @@ func (e *executor) start() {
 	// any other uses within the executor should create a context
 	// using the executor context as parent.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
+	e.stopOnce = &sync.Once{}
 
 	// the standardJobsWg tracks
 	standardJobsWg := &waitGroupWithMutex{}
@@ -138,7 +141,7 @@ func (e *executor) start() {
 
 			// spin off into a goroutine to unblock the executor and
 			// allow for processing for more work
-			go func() {
+			go func(executorCtx context.Context) {
 				// 处理 chan 出现阻塞,此时删除任务会关闭chan会导致出现异常 关闭的管道发送数据错误
 				defer func() {
 					if r := recover(); r != nil {
@@ -305,8 +308,7 @@ func (e *executor) start() {
 						}
 					} else {
 						select {
-						case <-e.stopCh:
-							e.stop(standardJobsWg, singletonJobsWg, limitModeJobsWg)
+						case <-executorCtx.Done():
 							return
 						default:
 						}
@@ -322,7 +324,7 @@ func (e *executor) start() {
 						}(*j)
 					}
 				}
-			}()
+			}(e.ctx)
 		case <-e.stopCh:
 			e.stop(standardJobsWg, singletonJobsWg, limitModeJobsWg)
 			return
@@ -505,6 +507,10 @@ func (e *executor) runJob(j internalJob, jIn jobIn) {
 			_ = callJobFuncWithParams(j.afterLockError, j.id, j.name, err)
 			e.sendOutForRescheduling(&jIn)
 			e.incrementJobCounter(j, Skip)
+			select {
+			case e.jobsOutCompleted <- jIn:
+			case <-e.ctx.Done():
+			}
 			return
 		}
 		defer func() { _ = lock.Unlock(j.ctx) }()
@@ -514,6 +520,10 @@ func (e *executor) runJob(j internalJob, jIn jobIn) {
 			_ = callJobFuncWithParams(j.afterLockError, j.id, j.name, err)
 			e.sendOutForRescheduling(&jIn)
 			e.incrementJobCounter(j, Skip)
+			select {
+			case e.jobsOutCompleted <- jIn:
+			case <-e.ctx.Done():
+			}
 			return
 		}
 		defer func() { _ = lock.Unlock(j.ctx) }()
@@ -569,7 +579,6 @@ func (e *executor) runJob(j internalJob, jIn jobIn) {
 	case e.jobsOutCompleted <- jIn:
 	case <-e.ctx.Done():
 	}
-
 }
 
 func (e *executor) callJobWithRecover(j internalJob) (err error) {
@@ -604,86 +613,88 @@ func (e *executor) incrementJobCounter(j internalJob, status JobStatus) {
 }
 
 func (e *executor) stop(standardJobsWg, singletonJobsWg, limitModeJobsWg *waitGroupWithMutex) {
-	e.logger.Debug("gocron: stopping executor")
-	// we've been asked to stop. This is either because the scheduler has been told
-	// to stop all jobs or the scheduler has been asked to completely shutdown.
-	//
-	// cancel tells all the functions to stop their work and send in a done response
-	e.cancel()
+	e.stopOnce.Do(func() {
+		e.logger.Debug("gocron: stopping executor")
+		// we've been asked to stop. This is either because the scheduler has been told
+		// to stop all jobs or the scheduler has been asked to completely shutdown.
+		//
+		// cancel tells all the functions to stop their work and send in a done response
+		e.cancel()
 
-	// the wait for job channels are used to report back whether we successfully waited
-	// for all jobs to complete or if we hit the configured timeout.
-	waitForJobs := make(chan struct{}, 1)
-	waitForSingletons := make(chan struct{}, 1)
-	waitForLimitMode := make(chan struct{}, 1)
+		// the wait for job channels are used to report back whether we successfully waited
+		// for all jobs to complete or if we hit the configured timeout.
+		waitForJobs := make(chan struct{}, 1)
+		waitForSingletons := make(chan struct{}, 1)
+		waitForLimitMode := make(chan struct{}, 1)
 
-	// the waiter context is used to cancel the functions waiting on jobs.
-	// this is done to avoid goroutine leaks.
-	waiterCtx, waiterCancel := context.WithCancel(context.Background())
+		// the waiter context is used to cancel the functions waiting on jobs.
+		// this is done to avoid goroutine leaks.
+		waiterCtx, waiterCancel := context.WithCancel(context.Background())
 
-	// wait for standard jobs to complete
-	go func() {
-		e.logger.Debug("gocron: waiting for standard jobs to complete")
+		// wait for standard jobs to complete
 		go func() {
-			// this is done in a separate goroutine, so we aren't
-			// blocked by the WaitGroup's Wait call in the event
-			// that the waiter context is cancelled.
-			// This particular goroutine could leak in the event that
-			// some long-running standard job doesn't complete.
-			standardJobsWg.Wait()
-			e.logger.Debug("gocron: standard jobs completed")
-			waitForJobs <- struct{}{}
+			e.logger.Debug("gocron: waiting for standard jobs to complete")
+			go func() {
+				// this is done in a separate goroutine, so we aren't
+				// blocked by the WaitGroup's Wait call in the event
+				// that the waiter context is cancelled.
+				// This particular goroutine could leak in the event that
+				// some long-running standard job doesn't complete.
+				standardJobsWg.Wait()
+				e.logger.Debug("gocron: standard jobs completed")
+				waitForJobs <- struct{}{}
+			}()
+			<-waiterCtx.Done()
 		}()
-		<-waiterCtx.Done()
-	}()
 
-	// wait for per job singleton limit mode runner jobs to complete
-	go func() {
-		e.logger.Debug("gocron: waiting for singleton jobs to complete")
+		// wait for per job singleton limit mode runner jobs to complete
 		go func() {
-			singletonJobsWg.Wait()
-			e.logger.Debug("gocron: singleton jobs completed")
-			waitForSingletons <- struct{}{}
+			e.logger.Debug("gocron: waiting for singleton jobs to complete")
+			go func() {
+				singletonJobsWg.Wait()
+				e.logger.Debug("gocron: singleton jobs completed")
+				waitForSingletons <- struct{}{}
+			}()
+			<-waiterCtx.Done()
 		}()
-		<-waiterCtx.Done()
-	}()
 
-	// wait for limit mode runners to complete
-	go func() {
-		e.logger.Debug("gocron: waiting for limit mode jobs to complete")
+		// wait for limit mode runners to complete
 		go func() {
-			limitModeJobsWg.Wait()
-			e.logger.Debug("gocron: limitMode jobs completed")
-			waitForLimitMode <- struct{}{}
+			e.logger.Debug("gocron: waiting for limit mode jobs to complete")
+			go func() {
+				limitModeJobsWg.Wait()
+				e.logger.Debug("gocron: limitMode jobs completed")
+				waitForLimitMode <- struct{}{}
+			}()
+			<-waiterCtx.Done()
 		}()
-		<-waiterCtx.Done()
-	}()
 
-	// now either wait for all the jobs to complete,
-	// or hit the timeout.
-	var count int
-	timeout := time.Now().Add(e.stopTimeout)
-	for time.Now().Before(timeout) && count < 3 {
-		select {
-		case <-waitForJobs:
-			count++
-		case <-waitForSingletons:
-			count++
-		case <-waitForLimitMode:
-			count++
-		default:
+		// now either wait for all the jobs to complete,
+		// or hit the timeout.
+		var count int
+		timeout := time.Now().Add(e.stopTimeout)
+		for time.Now().Before(timeout) && count < 3 {
+			select {
+			case <-waitForJobs:
+				count++
+			case <-waitForSingletons:
+				count++
+			case <-waitForLimitMode:
+				count++
+			default:
+			}
 		}
-	}
-	if count < 3 {
-		e.done <- ErrStopJobsTimedOut
-		e.logger.Debug("gocron: executor stopped - timed out")
-	} else {
-		e.done <- nil
-		e.logger.Debug("gocron: executor stopped")
-	}
-	waiterCancel()
+		if count < 3 {
+			e.done <- ErrStopJobsTimedOut
+			e.logger.Debug("gocron: executor stopped - timed out")
+		} else {
+			e.done <- nil
+			e.logger.Debug("gocron: executor stopped")
+		}
+		waiterCancel()
 
-	if e.limitMode != nil {
-		e.limitMode.started = false
-	}
+		if e.limitMode != nil {
+			e.limitMode.started = false
+		}
+	})
 }
